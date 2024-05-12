@@ -32,6 +32,22 @@ wrn = b+'[\033[33m!\033[37m] '+z
 inf = b+'[\033[34mi\033[37m] '+z
 npt = b+'[\033[37m?\033[37m] '+z
 
+def is_proxy_working(proxy):
+    """
+    Check if the given SOCKS5 proxy is working by making a HTTP request through it.
+
+    Args:
+    proxy (str): The proxy in the format "ip:port".
+    
+    Returns:
+    bool: True if the proxy is working, False otherwise.
+    """
+    formatted_proxy = f"socks5://{proxy}"
+    try:
+        response = requests.get('http://httpbin.org/ip', proxies={"http": formatted_proxy, "https": formatted_proxy}, timeout=5)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
 def show_banner():
 	banner = f"""
 
@@ -146,51 +162,56 @@ def read_lines(path):
 
 def is_listening(ip, port):
     # Randomly select a proxy from the list
-    proxy = random.choice(proxy_list)
-    proxy_host, proxy_port = proxy.split(':')
+		proxy = random.choice(proxy_list)
+		while not is_proxy_working(proxy):
+			proxy = random.choice(proxy_list)
+			proxy_host, proxy_port = proxy.split(':')
 
-    try:
-        port = int(port)
-        # Configure the socket to use the SOCKS5 proxy
-        socks.setdefaultproxy(socks.SOCKS5, proxy_host, int(proxy_port))
-        socket.socket = socks.socksocket
+			try:
+				port = int(port)
+				# Configure the socket to use the SOCKS5 proxy
+				socks.setdefaultproxy(socks.SOCKS5, proxy_host, int(proxy_port))
+				socket.socket = socks.socksocket
 
-        # Determine if we need an IPv6 socket
-        socket_type = socket.AF_INET6 if ':' in ip else socket.AF_INET
-        s = socket.socket(socket_type, socket.SOCK_STREAM)
-        s.settimeout(10)
+				# Determine if we need an IPv6 socket
+				socket_type = socket.AF_INET6 if ':' in ip else socket.AF_INET
+				s = socket.socket(socket_type, socket.SOCK_STREAM)
+				s.settimeout(10)
 
-        # Wrap the socket with SSL if connecting to port 465
-        if port == 465:
-            s = ssl.create_default_context().wrap_socket(s, server_hostname=ip)
+				# Wrap the socket with SSL if connecting to port 465
+				if port == 465:
+					s = ssl.create_default_context().wrap_socket(s, server_hostname=ip)
 
-        # Attempt to connect to the specified IP and port
-        s.connect((ip, port))
-        s.close()
-        return True
-    except Exception as e:
-        print(f"Failed to connect to {ip}:{port} through {proxy_host}:{proxy_port} - {str(e)}")
-        return False
-    finally:
-        # Reset the socket modification to not use the proxy
-        socks.setdefaultproxy()  # Clear proxy settings
-        socket.socket = socket._socket.socket  # Reset to original socket class
+				# Attempt to connect to the specified IP and port
+				s.connect((ip, port))
+				s.close()
+				return True
+			except Exception as e:
+				print(f"Failed to connect to {ip}:{port} through {proxy_host}:{proxy_port} - {str(e)}")
+				return False
+			finally:
+				# Reset the socket modification to not use the proxy
+				socks.setdefaultproxy()  # Clear proxy settings
+				socket.socket = socket._socket.socket  # Reset to original socket class
 class SocksProxyContext:
-    def __init__(self, proxy_list):
-        self.original_socket = socket.socket
-        self.proxy_list = proxy_list
+		def __init__(self, proxy_list):
+			self.original_socket = socket.socket
+			self.proxy_list = proxy_list
 
-    def __enter__(self):
-        if self.proxy_list:
-            proxy = random.choice(self.proxy_list)
-            proxy_host, proxy_port = proxy.split(':')
-            socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
-            socket.socket = socks.socksocket
-        return self
+		def __enter__(self):
+			if self.proxy_list:
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        socket.socket = self.original_socket
-        socks.set_default_proxy()  # Reset proxy settings
+				proxy = random.choice(proxy_list)
+				while not is_proxy_working(proxy):
+					proxy = random.choice(proxy_list)
+					proxy_host, proxy_port = proxy.split(':')
+					socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+					socket.socket = socks.socksocket
+			return self
+
+		def __exit__(self, exc_type, exc_value, traceback):
+			socket.socket = self.original_socket
+			socks.set_default_proxy()  # Reset proxy settings
 
 def get_rand_ip_of_host(host):
 	global proxy_list
@@ -279,13 +300,16 @@ def is_ignored_host(mail):
 	return len([ignored_str for ignored_str in exclude_mail_hosts.split(',') if ignored_str in mail.split('@')[-1]])>0
 
 def set_random_proxy():
-    if proxy_list:
-        proxy = random.choice(proxy_list)
-        proxy_host, proxy_port = proxy.split(':')
-        socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
-        socket.socket = socks.socksocket
-    else:
-        raise ValueError("Proxy list is empty")
+		if proxy_list:
+			proxy = random.choice(proxy_list)
+			while not is_proxy_working(proxy):
+				proxy = random.choice(proxy_list)
+				proxy = random.choice(proxy_list)
+				proxy_host, proxy_port = proxy.split(':')
+				socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+				socket.socket = socks.socksocket
+		else:
+			raise ValueError("Proxy list is empty")
 
 
 def socket_send_and_read(sock, cmd=''):
@@ -300,35 +324,37 @@ def socket_send_and_read(sock, cmd=''):
 		return ""
 
 def socket_get_free_smtp_server(smtp_server, port):
-    port = int(port)
-    smtp_server_ip = get_rand_ip_of_host(smtp_server)
+		port = int(port)
+		smtp_server_ip = get_rand_ip_of_host(smtp_server)
 
-    # Select a random proxy from the global list
-    proxy = random.choice(proxy_list) if proxy_list else None
-    if proxy:
-        proxy_host, proxy_port = proxy.split(':')
-        socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
-        sock_proxy = socks.socksocket()  # Create a new SOCKS proxy socket
-    else:
-        socket_type = socket.AF_INET6 if ':' in smtp_server_ip else socket.AF_INET
-        sock_proxy = socket.socket(socket_type, socket.SOCK_STREAM)
+		# Select a random proxy from the global list
+		proxy = random.choice(proxy_list) if proxy_list else None
+		while not is_proxy_working(proxy):
+			proxy = random.choice(proxy_list) if proxy_list else None
+			if proxy:
+				proxy_host, proxy_port = proxy.split(':')
+				socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+				sock_proxy = socks.socksocket()  # Create a new SOCKS proxy socket
+			else:
+				socket_type = socket.AF_INET6 if ':' in smtp_server_ip else socket.AF_INET
+				sock_proxy = socket.socket(socket_type, socket.SOCK_STREAM)
 
-    sock_proxy.settimeout(10)
+			sock_proxy.settimeout(10)
 
-    # SSL context creation for secure connections
-    if port == 465:
-        context = ssl.create_default_context()
-        s = context.wrap_socket(sock_proxy, server_hostname=smtp_server)
-    else:
-        s = sock_proxy
+			# SSL context creation for secure connections
+			if port == 465:
+				context = ssl.create_default_context()
+				s = context.wrap_socket(sock_proxy, server_hostname=smtp_server)
+			else:
+				s = sock_proxy
 
-    try:
-        s.connect((smtp_server_ip, port))
-    except Exception as e:
-        print(f"Connection error with {smtp_server_ip}:{port} -> {e}")
-        s.close()
-        raise
-    return s
+			try:
+				s.connect((smtp_server_ip, port))
+			except Exception as e:
+				print(f"Connection error with {smtp_server_ip}:{port} -> {e}")
+				s.close()
+				raise
+			return s
 
 def socket_try_tls(sock, self_host):
     set_random_proxy()  # Set a random proxy before the connection
@@ -461,29 +487,20 @@ def clean_smtp_entries(filename):
 		print("Error! Can't delete dublicates")
 		sys.exit(1)
 
-def get_proxy():
-    global current_proxy, request_count
-    if request_count % 5 == 0:
-        current_proxy = random.choice(proxy_list)
-    request_count += 1
-    return {
-        'http': f'socks5://{current_proxy}',
-        'https': f'socks5://{current_proxy}'
-    }
-
 def requests_get(url, **kwargs):
     # Use global proxy list to determine the proxy for the request
-    proxy = random.choice(proxy_list) if proxy_list else None
-    proxies = {
-        'http': f'socks5://{proxy}',
-        'https': f'socks5://{proxy}'
-    } if proxy else {}
-    try:
-        response = requests.get(url, proxies=proxies, **kwargs)
-        return response
-    except requests.RequestException as e:
-        print(f"Failed to make a request to {url} using {proxies}: {str(e)}")
-        return None
+	proxy = random.choice(proxy_list) if proxy_list else None
+	while not is_proxy_working(proxy):
+		proxies = {
+			'http': f'socks5://{proxy}',
+			'https': f'socks5://{proxy}'
+		} if proxy else {}
+		try:
+			response = requests.get(url, proxies=proxies, **kwargs)
+			return response
+		except requests.RequestException as e:
+			print(f"Failed to make a request to {url} using {proxies}: {str(e)}")
+			return None
 	
 	
 def worker_item(jobs_que, results_que, proxies):
@@ -647,6 +664,7 @@ input(npt+'press '+bold('[ Enter ]')+' to start...')
 threading.Thread(target=every_second, daemon=True).start()
 threading.Thread(target=printer, args=(jobs_que, results_que), daemon=True).start()
 
+	
 with open(list_filename, 'r', encoding='utf-8-sig', errors='ignore') as fp:
         for _ in range(start_from_line):
             next(fp)
