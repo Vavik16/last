@@ -3,7 +3,7 @@
 import socket, threading, sys, ssl, time, re, os, random, signal, queue, base64, socks
 from requests.exceptions import RequestException
 try:
-    import psutil, requests, dns.resolver
+    import psutil, requests, dns.resolver, certifi
 except ImportError:
     print('\033[1;33minstalling missing packages...\033[0m')
     os.system('apt -y install python3-pip; pip3 install psutil requests dnspython pyopenssl')
@@ -173,7 +173,10 @@ def is_listening(ip, port):
         s.settimeout(10)
 
         if port == 465:
-            s = ssl.create_default_context().wrap_socket(s, server_hostname=ip)
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            s = context.wrap_socket(s, server_hostname=ip)
 
         s.connect((ip, port))
         s.close()
@@ -243,7 +246,7 @@ def guess_smtp_server(domain):
             ip = get_rand_ip_of_host(host)
         except:
             continue
-        for port in [587, 465]:
+        for port in [465, 587]:
             debug(f'trying {host}, {ip}:{port}')
             if is_listening(ip, port):
                 return ([host+':'+str(port)], default_login_template)
@@ -301,7 +304,7 @@ def set_random_proxy():
     else:
         raise ValueError("Proxy list is empty")
 
-def socket_send_and_read(sock, cmd='', retries=3, delay=2):
+def socket_send_and_read(sock, cmd='', retries=4, delay=2):
     """
     Send a command to the socket and read the response with retries.
     
@@ -360,8 +363,8 @@ def socket_get_free_smtp_server(smtp_server, port, retries=3, delay=2):
 
             if port == 465:
                 context = ssl.create_default_context()
-                context.check_hostname = False  # Disable hostname checking for self-signed certificates
-                context.verify_mode = ssl.CERT_NONE  # Disable certificate verification for self-signed certificates
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
                 s = context.wrap_socket(sock_proxy, server_hostname=smtp_server)
             else:
                 s = sock_proxy
@@ -382,6 +385,8 @@ def socket_try_tls(sock, self_host):
         answer = socket_send_and_read(sock, 'STARTTLS')
         if answer.startswith('220'):
             context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
             sock = context.wrap_socket(sock, server_hostname=self_host)
     return sock
 
